@@ -28,6 +28,16 @@ public class LogAnalysisService {
     private final LogSanitizer logSanitizer;
     private final VectorStore vectorStore;
 
+    // Örnek JSON'lar sabit olarak tutuluyor; prompt'a {example} parametresi olarak veriliyor
+    private static final String CLASSIFIER_EXAMPLE =
+            "{\"severity\":\"HIGH\",\"category\":\"DATABASE\",\"isAnomaly\":true,\"reasoning\":\"Connection timeout errors repeated in the log\"}";
+
+    private static final String RCA_EXAMPLE =
+            "{\"rootCause\":\"Database connection timeout in the Oracle pool\",\"affectedComponent\":\"OracleConnectionPool\",\"historicalMatchFound\":true,\"historicalContext\":\"Incident 402: increase HikariCP timeout to 60s\"}";
+
+    private static final String ACTION_EXAMPLE =
+            "{\"recommendedActions\":[\"Increase HikariCP connection timeout to 60s\",\"Add a connection pool health check\"],\"priority\":\"IMMEDIATE\",\"requiresHumanReview\":false}";
+
     public AnalysisResult analyzeLogFile(MultipartFile file) {
         try {
             //Dosyayı String'e çevir
@@ -41,15 +51,15 @@ public class LogAnalysisService {
 
             ChatResponse response = chatClient.prompt()
                     .user(u -> u.text("""
-                Analyze the log below. You MUST provide your answer in the following format; do not add anything else.:
-
-                SUMMARY: (single sentence)
-                POSSIBLE CAUSE: (single sentence)
-                RECOMMENDED ACTION: (single sentence)
-
-                Log:
-                {logContent}
-                """)
+                    Analyze the log below. You MUST provide your answer in the following format; do not add anything else.:
+        
+                    SUMMARY: (single sentence)
+                    POSSIBLE CAUSE: (single sentence)
+                    RECOMMENDED ACTION: (single sentence)
+        
+                    Log:
+                    {logContent}
+                    """)
                             .param("logContent", sanitizedContent))
                     .call()
                     .chatResponse();
@@ -90,15 +100,15 @@ public class LogAnalysisService {
             // Ajanı çalıştırıyoruz ve Spring AI üzerinden aracı (tool) bağlıyoruz
             ChatResponse response = chatClient.prompt()
                     .system("""
-        You are an expert DevOps Autonomous Agent. When analyzing logs, query past solutions using the
-        'searchHistoricalErrors' tool if necessary.
-
-        Your answer MUST be in this format:
-        SUMMARY: (single sentence)
-        POSSIBLE CAUSE: (single sentence)
-        PAST RECORDS: (briefly if found, "none" if not found)
-        RECOMMENDED ACTION: (single sentence)
-        """)
+                    You are an expert DevOps Autonomous Agent. When analyzing logs, query past solutions using the
+                    'searchHistoricalErrors' tool if necessary.
+            
+                    Your answer MUST be in this format:
+                    SUMMARY: (single sentence)
+                    POSSIBLE CAUSE: (single sentence)
+                    PAST RECORDS: (briefly if found, "none" if not found)
+                    RECOMMENDED ACTION: (single sentence)
+                    """)
                     .user("Analyze these logs, find the root cause, and use historical database data if necessary: " + sanitizedContent)
                     .tools(logInvestigationTools) // AI'ın kullanabileceği Java yeteneği
                     .call()
@@ -177,12 +187,16 @@ public class LogAnalysisService {
      */
     private ClassificationResult runClassifierAgent(String sanitizedContent) {
         return chatClient.prompt()
-                .system("""
-                        You are a log classification expert. Your task is ONLY
-                        to determine the severity level and category of the log.
-                        DO NOT perform a root cause analysis; that is another agent's job.
-                        Provide the answer according to the requested diagram.
-                        """)
+                .system(s -> s.text("""
+                        You are a log classification expert. Only determine the severity and category of the log.
+                        Do NOT perform root cause analysis.
+                
+                        Return ONLY valid JSON. Do not add markdown, code fences, explanations, or any extra text.
+                        Do not use double quotes or line breaks inside string values.
+                        severity must be one of: CRITICAL, HIGH, MEDIUM, LOW.
+                
+                        Example output: {example}
+                        """).param("example", CLASSIFIER_EXAMPLE))
                 .user(u -> u.text("Classify this log: {logContent}")
                         .param("logContent", sanitizedContent))
                 .call()
@@ -195,15 +209,20 @@ public class LogAnalysisService {
      */
     private RootCauseResult runRcaAgent(String sanitizedContent, ClassificationResult classification) {
         return chatClient.prompt()
-                .system("""
+                .system(s -> s.text("""
                         You are an expert DevOps root cause analysis (RCA) agent.
-                        The previous agent classified this log as follows:
-                        Severity: %s, Category: %s
-
+                        A previous agent classified this log as: Severity: %s, Category: %s.
                         Use this context to identify the root cause.
-                        If necessary, use the 'searchHistoricalErrors' tool to
-                        check if there has been a similar case in the past.
+                        If needed, use the 'searchHistoricalErrors' tool to check for similar past incidents.
+                
+                        Return ONLY valid JSON. Do not add markdown, code fences, explanations, or any extra text.
+                        Do not use double quotes or line breaks inside string values; use single quotes instead.
+                        Keep every string value on a single line and under 200 characters.
+                        Always include every field, even if the value is empty.
+                
+                        Example output: {example}
                         """.formatted(classification.severity(), classification.category()))
+                        .param("example", RCA_EXAMPLE))
                 .user(u -> u.text("Log content: {logContent}")
                         .param("logContent", sanitizedContent))
                 .tools(logInvestigationTools) // Tool use burada aktif
@@ -218,12 +237,16 @@ public class LogAnalysisService {
      */
     private ActionPlanResult runActionAgent(ClassificationResult classification, RootCauseResult rootCause) {
         return chatClient.prompt()
-                .system("""
-                        You are an action planning agent. Your task is to
-                        generate actionable, clear steps based on the classification
-                        and root cause information provided to you. Suggest steps
-                        tailored to this specific situation, rather than general advice.
-                        """)
+                .system(s -> s.text("""
+                        You are an action planning agent. Based on the classification and root cause you receive,
+                        produce specific, actionable steps for this exact situation, not generic advice.
+                
+                        Return ONLY valid JSON. Do not add markdown, code fences, explanations, or any extra text.
+                        Do not use double quotes or line breaks inside string values.
+                        priority must be one of: IMMEDIATE, SCHEDULED, MONITOR.
+                
+                        Example output: {example}
+                        """).param("example", ACTION_EXAMPLE))
                 .user(u -> u.text("""
                         Classification:
                         - Severity: {severity}

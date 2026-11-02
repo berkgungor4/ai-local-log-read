@@ -32,7 +32,7 @@ public class LogInvestigationTools {
         SearchRequest searchRequest = SearchRequest.builder()
                 .query(errorCode)
                 .topK(2)   // En alakalı 2 kayıt yeterli, context'i şişirmemek için
-                .similarityThreshold(0.5)
+                .similarityThreshold(0.5)   // Anlamsal yakınlığın minimum kaç olması gerektiğini belirler
                 .build();
 
         List<Document> results = vectorStore.similaritySearch(searchRequest);
